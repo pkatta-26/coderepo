@@ -1,0 +1,26 @@
+# Kubernetes Configuration
+kubernetes_version: "1.29.6"
+pod_network_cidr: "192.168.0.0/16"
+cni_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml"
+container_runtime: "containerd"
+cgroup_driver: "systemd"
+firewalld_state: "stopped"
+
+# GCP Service Account Configuration
+# UPDATE THESE VALUES WITH YOUR ACTUAL GCP PROJECT DETAILS
+gcp_project_id: "your-project-id"
+gcp_zone: "us-central1-a"
+gcp_region: "us-central1"
+
+# Specify the service account to use (regardless of what's attached to VM)
+# This will use impersonation to act as this service account
+gcp_service_account_email: "devops@your-project-id.iam.gserviceaccount.com"
+
+# Use specific service account (override VM's default)
+use_specific_service_account: true
+# Set to false to use VM's attached service account instead
+use_vm_default_service_account: false
+
+# Enable GCP integration
+enable_gcp_integration: true
+enable_ip_forwarding: true

@@ -1,0 +1,416 @@
+---
+- name: Single control-plane Kubernetes setup on GCP with Specific Service Account
+  hosts: control
+  become: true
+  vars:
+    kubeadm_init_command: >-
+      kubeadm init
+      --pod-network-cidr={{ pod_network_cidr }}
+      --kubernetes-version {{ kubernetes_version }}
+      --cri-socket unix:///run/containerd/containerd.sock
+      {% if enable_gcp_integration %}
+      --cloud-provider=external
+      {% endif %}
+
+  pre_tasks:
+    # Verify running on GCP
+    - name: Check if running on GCP
+      ansible.builtin.uri:
+        url: http://metadata.google.internal/computeMetadata/v1/instance/id
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: gcp_metadata_check
+      failed_when: false
+      changed_when: false
+
+    - name: Get all available service accounts on VM
+      ansible.builtin.uri:
+        url: http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: available_service_accounts
+      when: 
+        - enable_gcp_integration | default(false)
+        - gcp_metadata_check.status == 200
+      changed_when: false
+      failed_when: false
+
+    - name: Display available service accounts
+      ansible.builtin.debug:
+        msg: |
+          Available service accounts on VM:
+          {{ available_service_accounts.content.split('\n') if available_service_accounts.status == 200 else ['Unable to retrieve'] }}
+          
+          Configured to use: {{ gcp_service_account_email }}
+      when: 
+        - enable_gcp_integration | default(false)
+        - available_service_accounts is defined
+
+    - name: Check if specific service account is available
+      ansible.builtin.uri:
+        url: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/{{ gcp_service_account_email }}/"
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: specific_sa_check
+      when: 
+        - enable_gcp_integration | default(false)
+        - use_specific_service_account | default(true)
+        - gcp_metadata_check.status == 200
+      failed_when: false
+      changed_when: false
+
+    - name: Verify specific service account is accessible
+      ansible.builtin.assert:
+        that:
+          - specific_sa_check.status == 200
+        fail_msg: |
+          ERROR: The specified service account is not accessible on this VM!
+          
+          Service account: {{ gcp_service_account_email }}
+          Status: {{ specific_sa_check.status if specific_sa_check is defined else 'Not checked' }}
+          
+          Available service accounts:
+          {{ available_service_accounts.content if available_service_accounts.status == 200 else 'Unable to retrieve' }}
+          
+          To make this service account available, attach it to the VM:
+          gcloud compute instances set-service-account {{ inventory_hostname }} \
+            --zone={{ gcp_zone }} \
+            --service-account={{ gcp_service_account_email }} \
+            --scopes=cloud-platform
+        success_msg: "Successfully verified service account: {{ gcp_service_account_email }}"
+      when: 
+        - enable_gcp_integration | default(false)
+        - use_specific_service_account | default(true)
+        - specific_sa_check is defined
+
+    - name: Get access token for specific service account
+      ansible.builtin.uri:
+        url: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/{{ gcp_service_account_email }}/token"
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: sa_token
+      when: 
+        - enable_gcp_integration | default(false)
+        - use_specific_service_account | default(true)
+        - gcp_metadata_check.status == 200
+      changed_when: false
+
+    - name: Display service account configuration
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          Service Account Configuration
+          ========================================
+          Using specific service account: {{ use_specific_service_account | default(true) }}
+          Service account email: {{ gcp_service_account_email }}
+          Access token available: {{ 'Yes' if (sa_token is defined and sa_token.status == 200) else 'No' }}
+          ========================================
+      when: enable_gcp_integration | default(false)
+
+    - name: Ensure swap is off now
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+)'
+        replace: '# \1'
+      notify: Reload systemd daemon
+
+  tasks:
+    # GCP Networking Configuration
+    - name: Enable IP forwarding in kernel (required for GCP)
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+      when: enable_ip_forwarding | default(false)
+
+    - name: Display GCP instance info
+      ansible.builtin.debug:
+        msg: "Running on GCP instance: {{ gcp_metadata_check.content if gcp_metadata_check.status == 200 else 'Not on GCP' }}"
+      when: enable_gcp_integration | default(false)
+
+    # Original tasks continue here...
+    - name: Install base dependencies
+      ansible.builtin.dnf:
+        name:
+          - yum-utils
+          - device-mapper-persistent-data
+          - lvm2
+          - iproute-tc
+          - iptables
+          - conntrack-tools
+          - ebtables
+          - socat
+          - curl
+          - bash-completion
+          - kernel-modules-extra
+          - jq
+        state: present
+
+    - name: Add Docker CE repo for containerd packages
+      ansible.builtin.command: dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+      args:
+        creates: /etc/yum.repos.d/docker-ce.repo
+      register: add_docker_repo
+      changed_when: add_docker_repo.rc == 0
+      notify: Reload systemd daemon
+
+    - name: Load kernel modules required by containerd/kube-proxy
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/containerd.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload modules
+
+    - name: Apply sysctl settings for Kubernetes networking
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes-cri.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Apply sysctl
+
+    - name: Ensure required kernel modules are loaded
+      ansible.builtin.shell: |
+        modprobe overlay
+        modprobe br_netfilter
+      changed_when: false
+
+    - name: Apply sysctl settings immediately
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    - name: Ensure containerd is installed
+      ansible.builtin.dnf:
+        name: containerd.io
+        state: present
+
+    - name: Ensure containerd config directory exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Generate default containerd config
+      ansible.builtin.command: containerd config default
+      register: containerd_config
+      changed_when: true
+      check_mode: false
+
+    - name: Write containerd config
+      ansible.builtin.copy:
+        dest: /etc/containerd/config.toml
+        content: "{{ containerd_config.stdout }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart containerd
+
+    - name: Ensure SystemdCgroup is enabled for containerd
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*=\s*false'
+        replace: '    SystemdCgroup = true'
+      notify: Restart containerd
+
+    - name: Configure Kubernetes yum repo
+      ansible.builtin.copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+
+    - name: Install Kubernetes components
+      ansible.builtin.dnf:
+        name:
+          - kubelet-{{ kubernetes_version }}
+          - kubeadm-{{ kubernetes_version }}
+          - kubectl-{{ kubernetes_version }}
+        disable_excludes: kubernetes
+        state: present
+
+    # GCP Integration: Configure kubelet for specific GCP service account
+    - name: Create kubelet systemd drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+        mode: '0755'
+      when: enable_gcp_integration | default(false)
+
+    - name: Configure kubelet with GCP service account
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kubelet.service.d/20-gcp.conf
+        content: |
+          [Service]
+          Environment="GCE_PROJECT_ID={{ gcp_project_id }}"
+          Environment="GCE_ZONE={{ gcp_zone }}"
+          Environment="GCE_SERVICE_ACCOUNT={{ gcp_service_account_email }}"
+        mode: '0644'
+      when: enable_gcp_integration | default(false)
+      notify: Reload systemd daemon
+
+    - name: Create script to get service account token
+      ansible.builtin.copy:
+        dest: /usr/local/bin/get-gcp-sa-token.sh
+        content: |
+          #!/bin/bash
+          # Get access token for specific service account
+          curl -s -H "Metadata-Flavor: Google" \
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/{{ gcp_service_account_email }}/token" | \
+            jq -r '.access_token'
+        mode: '0755'
+      when: 
+        - enable_gcp_integration | default(false)
+        - use_specific_service_account | default(true)
+
+    - name: Add service account info to environment
+      ansible.builtin.lineinfile:
+        path: /etc/environment
+        line: "GCP_SERVICE_ACCOUNT={{ gcp_service_account_email }}"
+        create: yes
+      when: enable_gcp_integration | default(false)
+
+    - name: Add service account to ec2-user bashrc
+      ansible.builtin.lineinfile:
+        path: /home/ec2-user/.bashrc
+        line: "export GCP_SERVICE_ACCOUNT={{ gcp_service_account_email }}"
+        create: yes
+      when: enable_gcp_integration | default(false)
+
+    - name: Enable kubelet service
+      ansible.builtin.service:
+        name: kubelet
+        enabled: true
+        state: stopped
+
+    - name: Apply configuration changes before control-plane init
+      ansible.builtin.meta: flush_handlers
+
+    - name: Initialize control-plane if not already done
+      ansible.builtin.command: "{{ kubeadm_init_command }}"
+      args:
+        creates: /etc/kubernetes/admin.conf
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      notify: Restart kubelet
+
+    - name: Ensure ec2-user kube directory exists
+      ansible.builtin.file:
+        path: /home/ec2-user/.kube
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0700'
+
+    - name: Create kubeconfig for ec2-user
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ec2-user/.kube/config
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+        remote_src: true
+
+    - name: Ensure kubelet is running
+      ansible.builtin.service:
+        name: kubelet
+        state: started
+        enabled: true
+
+    - name: Install Calico CNI
+      ansible.builtin.command: kubectl apply -f {{ cni_manifest_url }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      args:
+        creates: /etc/cni/net.d/calico-kubeconfig
+
+    # Remove taint for single-node cluster
+    - name: Remove control-plane taint (single-node scheduling)
+      ansible.builtin.command: kubectl taint nodes --all node-role.kubernetes.io/control-plane- --overwrite
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      changed_when: false
+      failed_when: false
+
+    # GCP Integration verification
+    - name: Verify GCP service account integration
+      block:
+        - name: Get service account being used
+          ansible.builtin.uri:
+            url: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/{{ gcp_service_account_email }}/"
+            headers:
+              Metadata-Flavor: Google
+            return_content: yes
+          register: final_sa_check
+          changed_when: false
+
+        - name: Display final service account info
+          ansible.builtin.debug:
+            msg: |
+              ========================================
+              GCP Service Account Integration Complete
+              ========================================
+              Specified Service Account: {{ gcp_service_account_email }}
+              Service Account Accessible: {{ 'Yes' if final_sa_check.status == 200 else 'No' }}
+              
+              You can get an access token anytime by running:
+              /usr/local/bin/get-gcp-sa-token.sh
+              ========================================
+
+      when: enable_gcp_integration | default(false)
+
+  handlers:
+    - name: Reload modules
+      ansible.builtin.shell: |
+        modprobe overlay
+        modprobe br_netfilter
+      listen: Reload modules
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      listen: Apply sysctl
+
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+        enabled: true
+      listen: Restart containerd
+
+    - name: Restart kubelet
+      ansible.builtin.service:
+        name: kubelet
+        state: restarted
+        enabled: true
+      listen: Restart kubelet
+
+    - name: Reload systemd daemon
+      ansible.builtin.command: systemctl daemon-reload
+      listen: Reload systemd daemon
