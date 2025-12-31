@@ -1,0 +1,30 @@
+Files in This Package
+=====================
+
+Configuration Files:
+├── ansible.cfg                 # Ansible configuration
+├── group_vars/all.yml         # Variables (update with your GCP details)
+└── inventory/hosts.ini        # Ansible inventory (updated by setup-gcp.sh)
+
+Playbooks:
+├── site.yml                   # Main installation playbook
+└── verify-gcp.yml            # Verification playbook
+
+Scripts:
+└── setup-gcp.sh              # GCP configuration helper script
+
+Documentation:
+├── README.md                  # Full documentation
+├── QUICKSTART.md             # Quick start guide
+└── TROUBLESHOOTING.md        # Troubleshooting guide
+
+Other:
+├── files/                    # Empty (no key files needed)
+│   └── README.md            # Explanation of why this is empty
+└── .gitignore               # Git ignore file
+
+Quick Start:
+1. Edit setup-gcp.sh with your GCP details
+2. Run ./setup-gcp.sh
+3. Run ansible-playbook -i inventory/hosts.ini verify-gcp.yml
+4. Run ansible-playbook -i inventory/hosts.ini site.yml

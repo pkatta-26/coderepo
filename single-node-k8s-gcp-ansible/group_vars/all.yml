@@ -7,14 +7,14 @@ cgroup_driver: "systemd"
 firewalld_state: "stopped"
 
 # GCP Service Account Configuration
+# UPDATE THESE VALUES WITH YOUR ACTUAL GCP PROJECT DETAILS
 gcp_project_id: "your-project-id"
 gcp_zone: "us-central1-a"
 gcp_region: "us-central1"
 gcp_service_account_email: "devops@your-project-id.iam.gserviceaccount.com"
-gcp_service_account_key_file: "{{ playbook_dir }}/files/devops-sa-key.json"
 
-# GCP Credentials path on target host
-gcp_credentials_dest: "/root/.config/gcloud/application_default_credentials.json"
+# Use VM's attached service account (no key file needed)
+use_vm_service_account: true
 
 # Enable GCP integration
 enable_gcp_integration: true

@@ -1,0 +1,21 @@
+# Ansible
+*.retry
+.ansible/
+
+# Backups
+*.backup
+*.bak
+*.tmp
+
+# Logs
+*.log
+
+# Service account keys (if someone adds them)
+files/*.json
+!files/README.md
+
+# Environment
+.env
+*.swp
+*.swo
+*~

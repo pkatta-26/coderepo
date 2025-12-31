@@ -13,38 +13,57 @@
       {% endif %}
 
   pre_tasks:
-    # GCP Service Account Setup
-    - name: Create gcloud config directory
-      ansible.builtin.file:
-        path: /root/.config/gcloud
-        state: directory
-        mode: '0700'
-        owner: root
-        group: root
-      when: enable_gcp_integration | default(false)
+    # Verify running on GCP
+    - name: Check if running on GCP
+      ansible.builtin.uri:
+        url: http://metadata.google.internal/computeMetadata/v1/instance/id
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: gcp_metadata_check
+      failed_when: false
+      changed_when: false
 
-    - name: Copy GCP service account key to target
-      ansible.builtin.copy:
-        src: "{{ gcp_service_account_key_file }}"
-        dest: "{{ gcp_credentials_dest }}"
-        mode: '0600'
-        owner: root
-        group: root
-      when: enable_gcp_integration | default(false)
+    - name: Get VM's service account from metadata
+      ansible.builtin.uri:
+        url: http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email
+        headers:
+          Metadata-Flavor: Google
+        return_content: yes
+      register: vm_service_account
+      when: 
+        - enable_gcp_integration | default(false)
+        - gcp_metadata_check.status == 200
 
-    - name: Set GCP credentials environment variable
-      ansible.builtin.lineinfile:
-        path: /etc/environment
-        line: "GOOGLE_APPLICATION_CREDENTIALS={{ gcp_credentials_dest }}"
-        create: yes
-      when: enable_gcp_integration | default(false)
+    - name: Display VM service account
+      ansible.builtin.debug:
+        msg: |
+          VM Service Account: {{ vm_service_account.content if vm_service_account.status == 200 else 'None' }}
+          Expected: {{ gcp_service_account_email }}
+          Match: {{ 'Yes' if (vm_service_account.status == 200 and vm_service_account.content == gcp_service_account_email) else 'No - Please attach the service account to the VM' }}
+      when: 
+        - enable_gcp_integration | default(false)
+        - vm_service_account is defined
 
-    - name: Add GCP credentials to ec2-user .bashrc
-      ansible.builtin.lineinfile:
-        path: /home/ec2-user/.bashrc
-        line: "export GOOGLE_APPLICATION_CREDENTIALS={{ gcp_credentials_dest }}"
-        create: yes
-      when: enable_gcp_integration | default(false)
+    - name: Verify service account is attached
+      ansible.builtin.assert:
+        that:
+          - vm_service_account.status == 200
+          - vm_service_account.content == gcp_service_account_email
+        fail_msg: |
+          ERROR: VM is not using the expected service account!
+          Current: {{ vm_service_account.content if vm_service_account.status == 200 else 'None' }}
+          Expected: {{ gcp_service_account_email }}
+          
+          Please attach the service account to your VM:
+          gcloud compute instances set-service-account {{ inventory_hostname }} \
+            --zone={{ gcp_zone }} \
+            --service-account={{ gcp_service_account_email }} \
+            --scopes=cloud-platform
+        success_msg: "VM is correctly using service account: {{ gcp_service_account_email }}"
+      when: 
+        - enable_gcp_integration | default(false)
+        - use_vm_service_account | default(true)
 
     - name: Ensure swap is off now
       ansible.builtin.command: swapoff -a
@@ -68,19 +87,9 @@
         sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
       when: enable_ip_forwarding | default(false)
 
-    - name: Check if running on GCP
-      ansible.builtin.uri:
-        url: http://metadata.google.internal/computeMetadata/v1/instance/id
-        headers:
-          Metadata-Flavor: Google
-        return_content: yes
-      register: gcp_metadata
-      failed_when: false
-      changed_when: false
-
     - name: Display GCP instance info
       ansible.builtin.debug:
-        msg: "Running on GCP instance: {{ gcp_metadata.content if gcp_metadata.status == 200 else 'Not on GCP' }}"
+        msg: "Running on GCP instance: {{ gcp_metadata_check.content if gcp_metadata_check.status == 200 else 'Not on GCP' }}"
       when: enable_gcp_integration | default(false)
 
     # Original tasks continue here...
@@ -98,7 +107,7 @@
           - curl
           - bash-completion
           - kernel-modules-extra
-          - jq  # Added for JSON parsing
+          - jq
         state: present
 
     - name: Add Docker CE repo for containerd packages
@@ -209,12 +218,11 @@
         mode: '0755'
       when: enable_gcp_integration | default(false)
 
-    - name: Configure kubelet with GCP credentials
+    - name: Configure kubelet with GCP environment
       ansible.builtin.copy:
         dest: /etc/systemd/system/kubelet.service.d/20-gcp.conf
         content: |
           [Service]
-          Environment="GOOGLE_APPLICATION_CREDENTIALS={{ gcp_credentials_dest }}"
           Environment="GCE_PROJECT_ID={{ gcp_project_id }}"
           Environment="GCE_ZONE={{ gcp_zone }}"
         mode: '0644'
@@ -236,7 +244,6 @@
         creates: /etc/kubernetes/admin.conf
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
-        GOOGLE_APPLICATION_CREDENTIALS: "{{ gcp_credentials_dest }}"
       notify: Restart kubelet
 
     - name: Ensure ec2-user kube directory exists
@@ -280,24 +287,25 @@
     # GCP Integration verification
     - name: Verify GCP service account integration
       block:
-        - name: Check GCP credentials are accessible
-          ansible.builtin.command: cat {{ gcp_credentials_dest }}
-          register: gcp_creds_check
+        - name: Get service account from metadata
+          ansible.builtin.uri:
+            url: http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email
+            headers:
+              Metadata-Flavor: Google
+            return_content: yes
+          register: final_sa_check
           changed_when: false
 
-        - name: Extract service account email from credentials
-          ansible.builtin.shell: |
-            cat {{ gcp_credentials_dest }} | jq -r '.client_email'
-          register: sa_email_check
-          changed_when: false
-
-        - name: Display service account info
+        - name: Display final service account info
           ansible.builtin.debug:
             msg: |
-              GCP Service Account Integration:
-              - Email: {{ sa_email_check.stdout }}
-              - Expected: {{ gcp_service_account_email }}
-              - Match: {{ 'Yes' if sa_email_check.stdout == gcp_service_account_email else 'No' }}
+              ========================================
+              GCP Service Account Integration Complete
+              ========================================
+              VM Service Account: {{ final_sa_check.content }}
+              Expected: {{ gcp_service_account_email }}
+              Status: {{ 'SUCCESS' if final_sa_check.content == gcp_service_account_email else 'MISMATCH' }}
+              ========================================
 
       when: enable_gcp_integration | default(false)
 
