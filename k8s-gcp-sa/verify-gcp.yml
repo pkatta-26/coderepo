@@ -3,7 +3,23 @@
   hosts: control
   become: true
   
+  vars:
+    # Construct service account email from name and project
+    gcp_service_account_email: "{{ gcp_service_account_name }}@{{ gcp_project_id }}.iam.gserviceaccount.com"
+  
   tasks:
+    - name: Display configuration being verified
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          Verifying Configuration
+          ================================================
+          Project ID: {{ gcp_project_id }}
+          Zone: {{ gcp_zone }}
+          Service Account Name: {{ gcp_service_account_name }}
+          Service Account Email: {{ gcp_service_account_email }}
+          ================================================
+
     - name: Check if running on GCP
       ansible.builtin.uri:
         url: http://metadata.google.internal/computeMetadata/v1/instance/id
@@ -45,6 +61,7 @@
       register: sa_token
       when: 
         - gcp_check.status == 200
+        - specific_sa is defined
         - specific_sa.status == 200
       changed_when: false
       failed_when: false
@@ -96,12 +113,17 @@
           Instance ID: {{ gcp_check.content }}
           
           ALL AVAILABLE SERVICE ACCOUNTS ON VM:
-          {{ all_sas.content.split('\n') | select | list | join('\n  ') }}
+          {% for sa in all_sas.content.split('\n') if sa %}
+          {% if sa.strip() %}
+            - {{ sa.strip() }}
+          {% endif %}
+          {% endfor %}
           
           CONFIGURED SERVICE ACCOUNT:
+          Name: {{ gcp_service_account_name }}
           Email: {{ gcp_service_account_email }}
-          Accessible: {{ 'YES ✓' if specific_sa.status == 200 else 'NO ✗' }}
-          {% if specific_sa.status == 200 %}
+          Accessible: {{ 'YES ✓' if (specific_sa is defined and specific_sa.status == 200) else 'NO ✗' }}
+          {% if specific_sa is defined and specific_sa.status == 200 %}
           Has Valid Token: {{ 'YES ✓' if (sa_token is defined and sa_token.status == 200) else 'NO ✗' }}
           {% if token_data is defined %}
           Token Type: {{ token_data.token_type | default('N/A') }}
@@ -112,12 +134,6 @@
           ⚠ WARNING: Service account {{ gcp_service_account_email }} is NOT accessible!
           
           This service account is not attached to this VM.
-          To attach it, run:
-          
-          gcloud compute instances set-service-account {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} \
-            --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }} \
-            --service-account={{ gcp_service_account_email }} \
-            --scopes=cloud-platform
           {% endif %}
           {% endif %}
           
@@ -174,27 +190,27 @@
           ================================================
           {% if gcp_check.status != 200 %}
           ⚠ Not running on GCP - GCP integration disabled
-          {% elif specific_sa.status != 200 %}
+          {% elif specific_sa is not defined or specific_sa.status != 200 %}
           ✗ SPECIFIC SERVICE ACCOUNT NOT ACCESSIBLE!
           
           Current situation:
-          - VM has {{ all_sas.content.split('\n') | select | list | length }} service account(s) attached
+          - VM has service accounts attached
           - {{ gcp_service_account_email }} is NOT one of them
           
-          To fix:
-          1. Attach the service account to this VM:
-             gcloud compute instances set-service-account {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} \
-               --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }} \
-               --service-account={{ gcp_service_account_email }} \
-               --scopes=cloud-platform
+          To fix, run from your LOCAL machine (not on this VM):
           
-          2. Restart the VM (required for service account change):
-             gcloud compute instances stop {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }}
-             gcloud compute instances start {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }}
+          gcloud compute instances set-service-account {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} \
+            --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else gcp_zone }} \
+            --service-account={{ gcp_service_account_email }} \
+            --scopes=cloud-platform
           
-          3. Re-run this verification playbook
+          Then restart the VM:
+          gcloud compute instances stop {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else gcp_zone }}
+          gcloud compute instances start {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else gcp_zone }}
+          
+          Then re-run this verification playbook.
           {% else %}
-          ✓ Service account {{ gcp_service_account_email }} is correctly configured!
+          ✓ Service account {{ gcp_service_account_name }} ({{ gcp_service_account_email }}) is correctly configured!
           {% if sa_token is defined and sa_token.status == 200 %}
           ✓ Access token can be retrieved successfully
           {% endif %}
