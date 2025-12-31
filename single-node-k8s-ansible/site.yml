@@ -1,0 +1,214 @@
+---
+- name: Single control-plane Kubernetes setup on RHEL
+  hosts: control
+  become: true
+  vars:
+    kubeadm_init_command: >-
+      kubeadm init
+      --pod-network-cidr={{ pod_network_cidr }}
+      --kubernetes-version {{ kubernetes_version }}
+      --cri-socket unix:///run/containerd/containerd.sock
+  pre_tasks:
+    - name: Ensure swap is off now
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+)'
+        replace: '# \1'
+      notify: Reload systemd daemon
+
+  tasks:
+    - name: Install base dependencies
+      ansible.builtin.dnf:
+        name:
+          - yum-utils
+          - device-mapper-persistent-data
+          - lvm2
+          - iproute-tc
+          - iptables
+          - conntrack-tools
+          - ebtables
+          - socat
+          - curl
+          - bash-completion
+          - kernel-modules-extra
+        state: present
+
+    - name: Add Docker CE repo for containerd packages
+      ansible.builtin.command: dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+      args:
+        creates: /etc/yum.repos.d/docker-ce.repo
+      register: add_docker_repo
+      changed_when: add_docker_repo.rc == 0
+      notify: Reload systemd daemon
+
+    - name: Load kernel modules required by containerd/kube-proxy
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/containerd.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload modules
+
+    - name: Apply sysctl settings for Kubernetes networking
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes-cri.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Apply sysctl
+
+    - name: Ensure required kernel modules are loaded
+      ansible.builtin.shell: |
+        modprobe overlay
+        modprobe br_netfilter
+      changed_when: false
+
+    - name: Apply sysctl settings immediately
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    - name: Ensure containerd is installed
+      ansible.builtin.dnf:
+        name: containerd.io
+        state: present
+
+    - name: Ensure containerd config directory exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Generate default containerd config
+      ansible.builtin.command: containerd config default
+      register: containerd_config
+      changed_when: true
+      check_mode: false
+
+    - name: Write containerd config
+      ansible.builtin.copy:
+        dest: /etc/containerd/config.toml
+        content: "{{ containerd_config.stdout }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart containerd
+
+    - name: Ensure SystemdCgroup is enabled for containerd
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*=\s*false'
+        replace: '    SystemdCgroup = true'
+      notify: Restart containerd
+
+    - name: Configure Kubernetes yum repo
+      ansible.builtin.copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+
+    - name: Install Kubernetes components
+      ansible.builtin.dnf:
+        name:
+          - kubelet-{{ kubernetes_version }}
+          - kubeadm-{{ kubernetes_version }}
+          - kubectl-{{ kubernetes_version }}
+        disable_excludes: kubernetes
+        state: present
+
+    - name: Enable kubelet service
+      ansible.builtin.service:
+        name: kubelet
+        enabled: true
+        state: stopped
+
+    - name: Apply configuration changes before control-plane init
+      ansible.builtin.meta: flush_handlers
+
+    - name: Initialize control-plane if not already done
+      ansible.builtin.command: "{{ kubeadm_init_command }}"
+      args:
+        creates: /etc/kubernetes/admin.conf
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      notify: Restart kubelet
+
+    - name: Ensure ec2-user kube directory exists
+      ansible.builtin.file:
+        path: /home/ec2-user/.kube
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0700'
+
+    - name: Create kubeconfig for ec2-user
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ec2-user/.kube/config
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+        remote_src: true
+
+    - name: Ensure kubelet is running
+      ansible.builtin.service:
+        name: kubelet
+        state: started
+        enabled: true
+
+    - name: Install Calico CNI
+      ansible.builtin.command: kubectl apply -f {{ cni_manifest_url }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      args:
+        creates: /etc/cni/net.d/calico-kubeconfig
+
+  handlers:
+    - name: Reload modules
+      ansible.builtin.shell: |
+        modprobe overlay
+        modprobe br_netfilter
+      listen: Reload modules
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+      listen: Apply sysctl
+
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+        enabled: true
+      listen: Restart containerd
+
+    - name: Restart kubelet
+      ansible.builtin.service:
+        name: kubelet
+        state: restarted
+        enabled: true
+      listen: Restart kubelet
+
+    - name: Reload systemd daemon
+      ansible.builtin.command: systemctl daemon-reload
+      listen: Reload systemd daemon

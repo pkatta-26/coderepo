@@ -1,0 +1,6 @@
+kubernetes_version: "1.29.6"
+pod_network_cidr: "192.168.0.0/16"
+cni_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml"
+container_runtime: "containerd"
+cgroup_driver: "systemd"
+firewalld_state: "stopped"

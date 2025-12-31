@@ -1,0 +1,182 @@
+---
+- name: Install Rancher on local Kubernetes cluster
+  hosts: local
+  become: true
+  vars:
+    helm_archive: "/tmp/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+    helm_dir: "/tmp/helm-v{{ helm_version }}"
+  pre_tasks:
+    - name: Ensure base tools are present
+      ansible.builtin.dnf:
+        name:
+          - curl
+          - tar
+          - gzip
+        state: present
+
+  tasks:
+    - name: Download helm archive
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+        dest: "{{ helm_archive }}"
+        mode: '0644'
+      register: helm_download
+
+    - name: Ensure helm extraction directory exists
+      ansible.builtin.file:
+        path: "{{ helm_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Extract helm archive
+      ansible.builtin.unarchive:
+        src: "{{ helm_archive }}"
+        dest: "{{ helm_dir }}"
+        remote_src: true
+        creates: "{{ helm_dir }}/linux-amd64/helm"
+
+    - name: Install helm binary
+      ansible.builtin.copy:
+        src: "{{ helm_dir }}/linux-amd64/helm"
+        dest: /usr/local/bin/helm
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: true
+
+    - name: Ensure KUBECONFIG directory exists for ec2-user
+      ansible.builtin.file:
+        path: /home/ec2-user/.kube
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0700'
+
+    - name: Validate kubeconfig presence
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
+
+    - name: Fail if kubeconfig is missing
+      ansible.builtin.fail:
+        msg: "kubeconfig not found at {{ kubeconfig_path }}; ensure the cluster is up and kubeconfig exists."
+      when: not kubeconfig_stat.stat.exists
+
+    - name: Remove control-plane taint for single-node scheduling
+      ansible.builtin.command: kubectl taint nodes --all node-role.kubernetes.io/control-plane- --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: taint_result
+      changed_when: taint_result.rc == 0
+      failed_when: taint_result.rc not in [0, 1]
+
+    - name: Discover public IPv4 for Rancher hostname when auto
+      ansible.builtin.command: curl -s https://checkip.amazonaws.com
+      register: public_ip_cmd
+      changed_when: false
+      failed_when: public_ip_cmd.rc != 0 or (public_ip_cmd.stdout | trim) == ''
+      when: rancher_hostname in ['auto', '', 'rancher.127.0.0.1.nip.io']
+
+    - name: Set Rancher hostname from public IP
+      ansible.builtin.set_fact:
+        rancher_hostname_effective: "{{ (public_ip_cmd.stdout | trim) }}.nip.io"
+      when: rancher_hostname in ['auto', '', 'rancher.127.0.0.1.nip.io']
+
+    - name: Use provided Rancher hostname
+      ansible.builtin.set_fact:
+        rancher_hostname_effective: "{{ rancher_hostname }}"
+      when: rancher_hostname not in ['auto', '', 'rancher.127.0.0.1.nip.io']
+
+    - name: Create namespace cert-manager
+      ansible.builtin.command: kubectl create namespace cert-manager
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      args:
+        creates: /tmp/.cert-manager-ns-created
+      register: cert_ns
+      changed_when: cert_ns.rc == 0
+      failed_when: cert_ns.rc not in [0,1]
+
+    - name: Mark cert-manager namespace created
+      ansible.builtin.copy:
+        dest: /tmp/.cert-manager-ns-created
+        content: "created"
+        mode: '0600'
+      when: cert_ns.rc == 0
+
+    - name: Apply cert-manager CRDs
+      ansible.builtin.command: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.crds.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Add cert-manager helm repo
+      ansible.builtin.command: /usr/local/bin/helm repo add jetstack https://charts.jetstack.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: add_jetstack
+      changed_when: add_jetstack.rc == 0
+      failed_when: add_jetstack.rc not in [0,1]
+
+    - name: Add rancher-latest helm repo
+      ansible.builtin.command: /usr/local/bin/helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: add_rancher_repo
+      changed_when: add_rancher_repo.rc == 0
+      failed_when: add_rancher_repo.rc not in [0,1]
+
+    - name: Update helm repos
+      ansible.builtin.command: /usr/local/bin/helm repo update
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Install/upgrade cert-manager
+      ansible.builtin.command: >-
+        /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager
+        --namespace cert-manager
+        --version {{ cert_manager_version }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Create namespace cattle-system
+      ansible.builtin.command: kubectl create namespace cattle-system
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      args:
+        creates: /tmp/.cattle-system-ns-created
+      register: cattle_ns
+      changed_when: cattle_ns.rc == 0
+      failed_when: cattle_ns.rc not in [0,1]
+
+    - name: Mark cattle-system namespace created
+      ansible.builtin.copy:
+        dest: /tmp/.cattle-system-ns-created
+        content: "created"
+        mode: '0600'
+      when: cattle_ns.rc == 0
+
+    - name: Install/upgrade Rancher
+      ansible.builtin.command: >-
+        /usr/local/bin/helm upgrade --install rancher rancher-latest/rancher
+        --namespace cattle-system
+        --set hostname={{ rancher_hostname_effective | default(rancher_hostname) }}
+        --set bootstrapPassword={{ rancher_bootstrap_password }}
+        --version {{ rancher_version }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+    - name: Wait for Rancher deployment to be ready
+      ansible.builtin.command: kubectl rollout status deploy/rancher -n cattle-system --timeout=5m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Show Rancher access info
+      ansible.builtin.debug:
+        msg: "Rancher installed. Access at https://{{ rancher_hostname_effective | default(rancher_hostname) }} (self-signed). Bootstrap password: {{ rancher_bootstrap_password }}"
