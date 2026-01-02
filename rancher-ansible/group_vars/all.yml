@@ -1,12 +1,26 @@
-# Existing K8s config...
+# Kubernetes Configuration
 kubernetes_version: "1.29.6"
 pod_network_cidr: "192.168.0.0/16"
+cni_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml"
+container_runtime: "containerd"
+cgroup_driver: "systemd"
+firewalld_state: "stopped"
 
-# GCP config...
+# GCP Configuration
+gcp_project_id: "edl-idass-rnd-platform-d5ae"
+gcp_zone: "us-central1-a"
+gcp_region: "us-central1"
+
+# Service Account
 gcp_service_account_name: "svc-idaas-devops"
 
+# Use specific service account
+use_specific_service_account: true
+enable_gcp_integration: true
+enable_ip_forwarding: true
+
 # Rancher Configuration
-rancher_hostname: "rancher.mycompany.local"  # Change this to your desired hostname
+rancher_hostname: "rancher.local"
 rancher_version: "2.9.3"
 cert_manager_version: "v1.14.5"
 rancher_namespace: "cattle-system"
