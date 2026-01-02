@@ -3,7 +3,23 @@
   hosts: control
   become: true
   
+  vars:
+    # Construct service account email from name and project
+    gcp_service_account_email: "{{ gcp_service_account_name }}@{{ gcp_project_id }}.iam.gserviceaccount.com"
+  
   tasks:
+    - name: Display configuration being verified
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          Verifying Configuration
+          ================================================
+          Project ID: {{ gcp_project_id }}
+          Zone: {{ gcp_zone }}
+          Service Account Name: {{ gcp_service_account_name }}
+          Service Account Email: {{ gcp_service_account_email }}
+          ================================================
+
     - name: Check if running on GCP
       ansible.builtin.uri:
         url: http://metadata.google.internal/computeMetadata/v1/instance/id
@@ -45,6 +61,8 @@
       register: sa_token
       when: 
         - gcp_check.status == 200
+        - specific_sa is defined
+        - specific_sa.status is defined
         - specific_sa.status == 200
       changed_when: false
       failed_when: false
@@ -54,7 +72,9 @@
         token_data: "{{ sa_token.content | from_json }}"
       when:
         - sa_token is defined
+        - sa_token.status is defined
         - sa_token.status == 200
+        - sa_token.content is defined
 
     - name: Get VM instance name
       ansible.builtin.uri:
@@ -91,18 +111,27 @@
           {% if gcp_check.status == 200 %}
           
           INSTANCE DETAILS:
-          Name: {{ vm_name.content }}
-          Zone: {{ vm_zone.content.split('/')[-1] }}
+          Name: {{ vm_name.content | default('N/A') }}
+          Zone: {{ vm_zone.content.split('/')[-1] | default('N/A') }}
           Instance ID: {{ gcp_check.content }}
           
           ALL AVAILABLE SERVICE ACCOUNTS ON VM:
-          {{ all_sas.content.split('\n') | select | list | join('\n  ') }}
+          {% if all_sas is defined and all_sas.status == 200 %}
+          {% for sa in all_sas.content.split('\n') %}
+          {% if sa.strip() %}
+            - {{ sa.strip() }}
+          {% endif %}
+          {% endfor %}
+          {% else %}
+            - Unable to retrieve
+          {% endif %}
           
           CONFIGURED SERVICE ACCOUNT:
+          Name: {{ gcp_service_account_name }}
           Email: {{ gcp_service_account_email }}
-          Accessible: {{ 'YES ✓' if specific_sa.status == 200 else 'NO ✗' }}
-          {% if specific_sa.status == 200 %}
-          Has Valid Token: {{ 'YES ✓' if (sa_token is defined and sa_token.status == 200) else 'NO ✗' }}
+          Accessible: {{ 'YES ✓' if (specific_sa is defined and specific_sa.status is defined and specific_sa.status == 200) else 'NO ✗' }}
+          {% if specific_sa is defined and specific_sa.status is defined and specific_sa.status == 200 %}
+          Has Valid Token: {{ 'YES ✓' if (sa_token is defined and sa_token.status is defined and sa_token.status == 200) else 'NO ✗' }}
           {% if token_data is defined %}
           Token Type: {{ token_data.token_type | default('N/A') }}
           Token Expires In: {{ token_data.expires_in | default('N/A') }} seconds
@@ -112,12 +141,6 @@
           ⚠ WARNING: Service account {{ gcp_service_account_email }} is NOT accessible!
           
           This service account is not attached to this VM.
-          To attach it, run:
-          
-          gcloud compute instances set-service-account {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} \
-            --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }} \
-            --service-account={{ gcp_service_account_email }} \
-            --scopes=cloud-platform
           {% endif %}
           {% endif %}
           
@@ -125,7 +148,6 @@
           IP Forwarding: {{ 'Enabled ✓' if ip_forward.stdout == '1' else 'Disabled ✗' }}
           
           ================================================
-      when: gcp_check.status == 200
 
     - name: Check Kubernetes cluster status
       ansible.builtin.command: kubectl get nodes -o wide
@@ -146,11 +168,19 @@
       when: k8s_nodes.rc == 0
 
     - name: Test service account token script
+      ansible.builtin.stat:
+        path: /usr/local/bin/get-gcp-sa-token.sh
+      register: token_script_exists
+      changed_when: false
+
+    - name: Run token script if it exists
       ansible.builtin.command: /usr/local/bin/get-gcp-sa-token.sh
       register: token_script_test
       changed_when: false
       failed_when: false
-      when: gcp_check.status == 200
+      when: 
+        - token_script_exists.stat.exists
+        - gcp_check.status == 200
 
     - name: Display token script test
       ansible.builtin.debug:
@@ -158,13 +188,14 @@
           ================================================
           SERVICE ACCOUNT TOKEN SCRIPT TEST
           ================================================
-          Script exists: {{ 'Yes' if token_script_test.rc == 0 else 'No' }}
+          Script exists: {{ 'Yes' if token_script_exists.stat.exists else 'No' }}
+          {% if token_script_exists.stat.exists and token_script_test is defined %}
+          Token retrieved: {{ 'Yes ✓' if (token_script_test.rc is defined and token_script_test.rc == 0 and token_script_test.stdout | length > 0) else 'No ✗' }}
           {% if token_script_test.rc == 0 %}
-          Token retrieved: {{ 'Yes ✓' if token_script_test.stdout | length > 0 else 'No ✗' }}
           Token length: {{ token_script_test.stdout | length }} characters
           {% endif %}
+          {% endif %}
           ================================================
-      when: token_script_test is defined
 
     - name: Provide summary and recommendations
       ansible.builtin.debug:
@@ -174,38 +205,52 @@
           ================================================
           {% if gcp_check.status != 200 %}
           ⚠ Not running on GCP - GCP integration disabled
-          {% elif specific_sa.status != 200 %}
+          
+          {% elif specific_sa is not defined or specific_sa.status is not defined or specific_sa.status != 200 %}
           ✗ SPECIFIC SERVICE ACCOUNT NOT ACCESSIBLE!
           
           Current situation:
-          - VM has {{ all_sas.content.split('\n') | select | list | length }} service account(s) attached
-          - {{ gcp_service_account_email }} is NOT one of them
+          - Service account configured: {{ gcp_service_account_email }}
+          - This service account is NOT attached to the VM
           
-          To fix:
-          1. Attach the service account to this VM:
-             gcloud compute instances set-service-account {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} \
-               --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }} \
-               --service-account={{ gcp_service_account_email }} \
-               --scopes=cloud-platform
+          To fix, run from your LOCAL machine (not on this VM):
           
-          2. Restart the VM (required for service account change):
-             gcloud compute instances stop {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }}
-             gcloud compute instances start {{ vm_name.content if vm_name is defined else 'YOUR_VM' }} --zone={{ vm_zone.content.split('/')[-1] if vm_zone is defined else 'YOUR_ZONE' }}
+          gcloud compute instances set-service-account {{ vm_name.content if (vm_name is defined and vm_name.content is defined) else 'YOUR_VM_NAME' }} \
+            --zone={{ vm_zone.content.split('/')[-1] if (vm_zone is defined and vm_zone.content is defined) else gcp_zone }} \
+            --service-account={{ gcp_service_account_email }} \
+            --scopes=cloud-platform
           
-          3. Re-run this verification playbook
+          Then restart the VM:
+          gcloud compute instances stop {{ vm_name.content if (vm_name is defined and vm_name.content is defined) else 'YOUR_VM_NAME' }} \
+            --zone={{ vm_zone.content.split('/')[-1] if (vm_zone is defined and vm_zone.content is defined) else gcp_zone }}
+          
+          gcloud compute instances start {{ vm_name.content if (vm_name is defined and vm_name.content is defined) else 'YOUR_VM_NAME' }} \
+            --zone={{ vm_zone.content.split('/')[-1] if (vm_zone is defined and vm_zone.content is defined) else gcp_zone }}
+          
+          Then re-run this verification playbook.
+          
           {% else %}
-          ✓ Service account {{ gcp_service_account_email }} is correctly configured!
-          {% if sa_token is defined and sa_token.status == 200 %}
+          ✓ Service account {{ gcp_service_account_name }} is correctly configured!
+          ✓ Email: {{ gcp_service_account_email }}
+          {% if sa_token is defined and sa_token.status is defined and sa_token.status == 200 %}
           ✓ Access token can be retrieved successfully
           {% endif %}
+          {% if token_script_exists.stat.exists %}
+          ✓ Token helper script installed: /usr/local/bin/get-gcp-sa-token.sh
           {% endif %}
           
+          {% endif %}
           {% if ip_forward.stdout != '1' %}
           ✗ IP forwarding is disabled!
-          Run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          {% endif %}
           
-          {% if k8s_nodes.rc == 0 %}
+          To fix, run:
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+          sudo sysctl -p /etc/sysctl.d/99-kubernetes-cri.conf
+          
+          {% else %}
+          ✓ IP forwarding is enabled
+          {% endif %}
+          {% if k8s_nodes is defined and k8s_nodes.rc == 0 %}
           ✓ Kubernetes cluster is accessible
           {% endif %}
           ================================================
