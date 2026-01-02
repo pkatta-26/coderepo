@@ -3,13 +3,6 @@
   hosts: control
   become: true
   
-  vars:
-    rancher_version: "2.9.3"
-    cert_manager_version: "v1.14.5"
-    rancher_namespace: "cattle-system"
-    cert_manager_namespace: "cert-manager"
-    rancher_bootstrap_password: "admin"
-    
   tasks:
     - name: Get current user
       ansible.builtin.command: whoami
@@ -46,34 +39,18 @@
       ansible.builtin.debug:
         msg: "{{ k8s_check.stdout_lines }}"
 
-    - name: Get external IP from GCP metadata
-      ansible.builtin.shell: curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip
-      register: external_ip_result
-      changed_when: false
-      failed_when: false
-
-    - name: Set Rancher hostname with external IP
-      ansible.builtin.set_fact:
-        rancher_hostname: "{{ external_ip_result.stdout }}.sslip.io"
-      when: external_ip_result.rc == 0 and external_ip_result.stdout != ""
-
-    - name: Set default hostname if external IP not found
-      ansible.builtin.set_fact:
-        rancher_hostname: "rancher.local"
-      when: external_ip_result.rc != 0 or external_ip_result.stdout == ""
-
     - name: Display Rancher hostname
       ansible.builtin.debug:
         msg: "Rancher will be accessible at: https://{{ rancher_hostname }}"
 
-    # Install Helm
     - name: Check if Helm is already installed
       ansible.builtin.stat:
         path: /usr/local/bin/helm
       register: helm_exists
 
     - name: Download and install Helm
-      ansible.builtin.shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      ansible.builtin.shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       when: not helm_exists.stat.exists
 
     - name: Verify Helm installation
@@ -85,18 +62,21 @@
       ansible.builtin.debug:
         msg: "{{ helm_version_check.stdout }}"
 
-    # Add Helm repositories
     - name: Add Rancher Helm repository
-      ansible.builtin.shell: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable || true
+      ansible.builtin.command: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: rancher_repo
       changed_when: false
+      failed_when: false
 
     - name: Add Jetstack Helm repository
-      ansible.builtin.shell: helm repo add jetstack https://charts.jetstack.io || true
+      ansible.builtin.command: helm repo add jetstack https://charts.jetstack.io
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: jetstack_repo
       changed_when: false
+      failed_when: false
 
     - name: Update Helm repositories
       ansible.builtin.command: helm repo update
@@ -104,15 +84,16 @@
         KUBECONFIG: "{{ kubeconfig_path }}"
       changed_when: false
 
-    # Install cert-manager
     - name: Create cert-manager namespace
-      ansible.builtin.shell: kubectl create namespace {{ cert_manager_namespace }} || true
+      ansible.builtin.command: kubectl create namespace {{ cert_manager_namespace }}
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: certmanager_ns
       changed_when: false
+      failed_when: false
 
     - name: Install cert-manager CRDs
-      ansible.builtin.shell: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.crds.yaml
+      ansible.builtin.command: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.crds.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       changed_when: false
@@ -159,12 +140,13 @@
       ansible.builtin.debug:
         msg: "{{ certmanager_pods.stdout_lines }}"
 
-    # Install Rancher
     - name: Create Rancher namespace
-      ansible.builtin.shell: kubectl create namespace {{ rancher_namespace }} || true
+      ansible.builtin.command: kubectl create namespace {{ rancher_namespace }}
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+      register: rancher_ns
       changed_when: false
+      failed_when: false
 
     - name: Check if Rancher is already installed
       ansible.builtin.command: helm list -n {{ rancher_namespace }}
@@ -207,13 +189,6 @@
       ansible.builtin.debug:
         msg: "{{ rancher_pods.stdout_lines }}"
 
-    - name: Get all Rancher resources
-      ansible.builtin.command: kubectl get all -n {{ rancher_namespace }}
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      register: rancher_resources
-      changed_when: false
-
     - name: Display final installation summary
       ansible.builtin.debug:
         msg: |
@@ -221,15 +196,12 @@
           Rancher Installation Complete!
           ==========================================
           
-          Access Rancher UI:
-            URL: https://{{ rancher_hostname }}
-            Username: admin
-            Password: {{ rancher_bootstrap_password }}
+          Access Rancher UI at: https://{{ rancher_hostname }}
+          Username: admin
+          Password: {{ rancher_bootstrap_password }}
           
-          Note: You will see a certificate warning.
-          This is normal for self-signed certificates.
+          Add to /etc/hosts on your local machine:
+          <VM_IP> {{ rancher_hostname }}
           
-          After first login:
-            1. Set a new secure password
-            2. Configure server URL
+          Note: You will see a certificate warning - this is normal.
           ==========================================
