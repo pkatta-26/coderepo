@@ -144,7 +144,7 @@
         --namespace {{ cert_manager_namespace }}
         --version {{ cert_manager_version }}
         --wait
-        --timeout 10m
+        --timeout 10m 
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       when: "'cert-manager' not in certmanager_check.stdout"
