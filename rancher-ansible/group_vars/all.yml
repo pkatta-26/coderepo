@@ -1,6 +1,14 @@
-kubeconfig_path: "/home/ec2-user/.kube/config"
-helm_version: "3.14.4"
-cert_manager_version: "v1.14.4"
-rancher_version: "2.9.2"
-rancher_hostname: "auto"  # set to "auto" to use this server's public IP with nip.io; override with your DNS name if desired
-rancher_bootstrap_password: "Admin123!"
+# Existing K8s config...
+kubernetes_version: "1.29.6"
+pod_network_cidr: "192.168.0.0/16"
+
+# GCP config...
+gcp_service_account_name: "svc-idaas-devops"
+
+# Rancher Configuration
+rancher_hostname: "rancher.mycompany.local"  # Change this to your desired hostname
+rancher_version: "2.9.3"
+cert_manager_version: "v1.14.5"
+rancher_namespace: "cattle-system"
+cert_manager_namespace: "cert-manager"
+rancher_bootstrap_password: "admin"
