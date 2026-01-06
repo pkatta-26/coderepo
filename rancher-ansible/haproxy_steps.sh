@@ -163,3 +163,29 @@ kubectl rollout status deployment rancher -n cattle-system
 # Test
 INTERNAL_IP=$(hostname -I | awk '{print $1}')
 curl -I http://$INTERNAL_IP:3000
+
+
+
+# Patch to add HTTPS port
+kubectl patch svc rancher -n cattle-system -p '{
+  "spec": {
+    "ports": [
+      {
+        "name": "http",
+        "port": 80,
+        "protocol": "TCP",
+        "targetPort": 80,
+        "nodePort": 30000
+      },
+      {
+        "name": "https",
+        "port": 443,
+        "protocol": "TCP",
+        "targetPort": 443,
+        "nodePort": 30443
+      }
+    ]
+  }
+}'
+
+kubectl get svc rancher -n cattle-system
