@@ -91,3 +91,53 @@ sudo systemctl restart haproxy
 
 # Check status
 sudo systemctl status haproxy
+
+
+
+
+-----using internal ip
+
+export KUBECONFIG=$HOME/.kube/config
+
+# Get internal IP and NodePort
+INTERNAL_IP=$(hostname -I | awk '{print $1}')
+NODE_PORT=$(kubectl get svc rancher -n cattle-system -o jsonpath='{.spec.ports[0].nodePort}')
+
+echo "Internal IP: $INTERNAL_IP"
+echo "NodePort: $NODE_PORT"
+
+# Create HAProxy config with internal IP
+sudo tee /etc/haproxy/haproxy.cfg > /dev/null << EOF
+global
+    daemon
+
+defaults
+    mode http
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+
+frontend rancher_frontend
+    bind *:3000
+    default_backend rancher_backend
+
+backend rancher_backend
+    server rancher ${INTERNAL_IP}:${NODE_PORT} check
+EOF
+
+# Test config
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+
+# Restart HAProxy
+sudo systemctl restart haproxy
+
+# Wait
+sleep 5
+
+# Test
+curl -v http://localhost:3000
+
+# Check backend status
+echo ""
+echo "Backend status:"
+echo "show stat" | sudo socat stdio /var/run/haproxy/admin.sock | grep "^rancher_backend,rancher"
