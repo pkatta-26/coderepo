@@ -1,19 +1,32 @@
 # Install HAProxy
 sudo dnf install -y haproxy
 
-# Configure HAProxy
-sudo tee /etc/haproxy/haproxy.cfg > /dev/null << 'EOF'
+# Get Rancher service IP
+export KUBECONFIG=$HOME/.kube/config
+RANCHER_IP=$(kubectl get svc rancher -n cattle-system -o jsonpath='{.spec.clusterIP}')
+
+echo "Rancher Service IP: $RANCHER_IP"
+
+# Create HAProxy configuration
+sudo tee /etc/haproxy/haproxy.cfg > /dev/null << EOF
 global
     log /dev/log local0
-    maxconn 4096
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
 
 defaults
-    log global
-    mode http
-    option httplog
-    timeout connect 5000ms
-    timeout client 50000ms
-    timeout server 50000ms
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
 
 frontend rancher_frontend
     bind *:3000
@@ -21,15 +34,16 @@ frontend rancher_frontend
 
 backend rancher_backend
     balance roundrobin
-    server rancher localhost:80 check
+    option httpchk GET / HTTP/1.1\r\nHost:\ localhost
+    server rancher ${RANCHER_IP}:80 check
 EOF
 
-# Start HAProxy
+# Test HAProxy configuration
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+
+# If test passes, enable and start HAProxy
 sudo systemctl enable haproxy
 sudo systemctl start haproxy
 
-# Open firewall
-sudo firewall-cmd --add-port=3000/tcp --permanent
-sudo firewall-cmd --reload
-
-# Access: http://<VM_IP>:3000
+# Check status
+sudo systemctl status haproxy
