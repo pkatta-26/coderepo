@@ -189,3 +189,60 @@ kubectl patch svc rancher -n cattle-system -p '{
 }'
 
 kubectl get svc rancher -n cattle-system
+
+
+
+----update haproxy to use this
+
+INTERNAL_IP=$(hostname -I | awk '{print $1}')
+
+# Create HAProxy config with HTTPS on port 30443
+sudo tee /etc/haproxy/haproxy.cfg > /dev/null << EOF
+global
+    daemon
+    maxconn 256
+
+defaults
+    mode tcp
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+
+frontend rancher_http
+    bind *:3000
+    mode tcp
+    default_backend rancher_http_backend
+
+backend rancher_http_backend
+    mode tcp
+    server rancher ${INTERNAL_IP}:30000
+
+frontend rancher_https
+    bind *:3443
+    mode tcp
+    default_backend rancher_https_backend
+
+backend rancher_https_backend
+    mode tcp
+    server rancher ${INTERNAL_IP}:30443 check
+EOF
+
+# Test config
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+
+# Open firewall for port 3443
+sudo firewall-cmd --add-port=3443/tcp --permanent
+sudo firewall-cmd --reload
+
+# Restart HAProxy
+sudo systemctl restart haproxy
+
+# Wait
+sleep 5
+
+# Test
+echo "Testing HTTPS through HAProxy:"
+curl -Ik https://$INTERNAL_IP:3443
+
+echo ""
+echo "Access Rancher at: https://$INTERNAL_IP:3443"
