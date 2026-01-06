@@ -52,41 +52,41 @@ sudo systemctl status haproxy
 
 ------update
 
-# Update HAProxy config to use localhost:30000
+# Create directory with correct permissions
+sudo mkdir -p /run/haproxy
+sudo chown haproxy:haproxy /run/haproxy
+sudo chmod 755 /run/haproxy
+
+# Create config with admin socket
 sudo tee /etc/haproxy/haproxy.cfg > /dev/null << 'EOF'
 global
     log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
     stats socket /run/haproxy/admin.sock mode 660 level admin
-    stats timeout 30s
+    maxconn 4096
     user haproxy
     group haproxy
     daemon
 
 defaults
-    log     global
-    mode    http
-    option  httplog
-    option  dontlognull
-    timeout connect 5000
-    timeout client  50000
-    timeout server  50000
+    log global
+    mode http
+    option httplog
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
 
 frontend rancher_frontend
     bind *:3000
     default_backend rancher_backend
 
 backend rancher_backend
-    balance roundrobin
-    option httpchk
     server rancher localhost:30000 check
 EOF
 
 # Test config
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
-# Restart HAProxy
+# Start HAProxy
 sudo systemctl restart haproxy
 
 # Check status
