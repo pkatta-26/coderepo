@@ -141,3 +141,25 @@ curl -v http://localhost:3000
 echo ""
 echo "Backend status:"
 echo "show stat" | sudo socat stdio /var/run/haproxy/admin.sock | grep "^rancher_backend,rancher"
+
+
+
+
+# Set Rancher to use HTTP
+kubectl -n cattle-system patch deploy rancher --type=json -p='[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/env/-",
+    "value": {
+      "name": "CATTLE_SERVER_URL",
+      "value": "http://'$(hostname -I | awk '{print $1}')':3000"
+    }
+  }
+]'
+
+# Wait for Rancher to restart
+kubectl rollout status deployment rancher -n cattle-system
+
+# Test
+INTERNAL_IP=$(hostname -I | awk '{print $1}')
+curl -I http://$INTERNAL_IP:3000
