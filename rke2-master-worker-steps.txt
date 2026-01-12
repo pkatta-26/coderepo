@@ -1,0 +1,171 @@
+B) Do this on the HAProxy machine (or on rke2-server if HAProxy runs there)
+1) Install HAProxy
+
+Ubuntu/Debian
+
+sudo apt-get update
+sudo apt-get install -y haproxy
+
+
+RHEL/Rocky/Amazon Linux
+
+sudo yum install -y haproxy
+
+2) Configure HAProxy
+
+Edit:
+
+sudo vi /etc/haproxy/haproxy.cfg
+
+
+Paste this (replace RKE2_SERVER_IP):
+
+global
+  maxconn 20000
+
+defaults
+  mode tcp
+  option tcplog
+  timeout connect 10s
+  timeout client  1m
+  timeout server  1m
+
+# --- Kubernetes API ---
+frontend k8s_api
+  bind *:6443
+  default_backend k8s_api_back
+
+backend k8s_api_back
+  mode tcp
+  balance roundrobin
+  server rke2s1 RKE2_SERVER_IP:6443 check
+
+# --- Rancher via ingress HTTP on 8080 ---
+frontend rancher_http_8080
+  bind *:8080
+  default_backend ingress_http_back
+
+backend ingress_http_back
+  mode tcp
+  balance roundrobin
+  server node1 RKE2_SERVER_IP:80 check
+
+3) Start HAProxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+sudo systemctl status haproxy --no-pager
+
+
+Quick port check:
+
+sudo ss -lntp | egrep ':6443|:8080'
+
+C) Do this on the RKE2 Server (control plane)
+1) Create RKE2 config
+sudo mkdir -p /etc/rancher/rke2
+sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<YAML
+write-kubeconfig-mode: "0644"
+tls-san:
+  - "HAPROXY_IP_OR_DNS"
+kubelet-arg:
+  - "image-gc-high-threshold=85"
+  - "image-gc-low-threshold=70"
+YAML
+
+2) Install RKE2 server
+curl -sfL https://get.rke2.io | sudo sh -
+
+3) Enable + start
+sudo systemctl enable rke2-server
+sudo systemctl start rke2-server
+
+4) Watch logs until it’s ready
+sudo journalctl -u rke2-server -f
+
+5) Use kubectl
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+sudo /var/lib/rancher/rke2/bin/kubectl get nodes -o wide
+
+6) Confirm RKE2 is writing to /var/lib (your big disk)
+sudo du -sh /var/lib/rancher/rke2
+
+7) Get the worker join token
+sudo cat /var/lib/rancher/rke2/server/node-token
+
+
+Copy that token.
+
+D) Do this on the RKE2 Worker node
+1) Create worker config (agent)
+sudo mkdir -p /etc/rancher/rke2
+sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<YAML
+server: https://HAPROXY_IP_OR_DNS:6443
+token: "PASTE_NODE_TOKEN_HERE"
+kubelet-arg:
+  - "image-gc-high-threshold=85"
+  - "image-gc-low-threshold=70"
+YAML
+
+2) Install RKE2 agent
+curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_TYPE="agent" sh -
+
+3) Enable + start
+sudo systemctl enable rke2-agent
+sudo systemctl start rke2-agent
+
+4) Verify worker joined (run on server)
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+sudo /var/lib/rancher/rke2/bin/kubectl get nodes -o wide
+
+E) Install Rancher (run on the server, where kubectl works)
+1) Install Helm (if missing)
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+2) Add repos
+helm repo add jetstack https://charts.jetstack.io
+helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+helm repo update
+
+3) Install cert-manager
+kubectl create namespace cert-manager || true
+
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --set crds.enabled=true
+
+
+Wait:
+
+kubectl -n cert-manager rollout status deploy/cert-manager
+kubectl -n cert-manager rollout status deploy/cert-manager-webhook
+kubectl -n cert-manager rollout status deploy/cert-manager-cainjector
+
+4) Install Rancher
+
+Set your hostname (RANCHER_HOSTNAME):
+
+kubectl create namespace cattle-system || true
+
+helm install rancher rancher-latest/rancher \
+  --namespace cattle-system \
+  --set hostname=RANCHER_HOSTNAME \
+  --set replicas=1
+
+
+Wait:
+
+kubectl -n cattle-system rollout status deploy/rancher
+kubectl -n cattle-system get pods
+
+F) Access Rancher through HAProxy :8080
+
+Open:
+
+http://HAPROXY_IP:8080
+
+or http://RANCHER_HOSTNAME:8080 (if DNS points to HAProxy)
+
+Quick test from HAProxy node:
+
+curl -I http://RKE2_SERVER_IP
+curl -I http://HAPROXY_IP:8080
