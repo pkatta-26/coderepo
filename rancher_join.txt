@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Get token
+TOKEN=$(kubectl create token default -n kube-system --duration=24h)
+
+# Get CA cert hash
+CA_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
+  openssl rsa -pubin -outform der 2>/dev/null | \
+  openssl dgst -sha256 -hex | sed 's/^.* //')
+
+# Get master IP
+MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+
+# Print join command
+echo "=== Worker Node Join Command ==="
+echo ""
+echo "sudo kubeadm join ${MASTER_IP}:6443 --token ${TOKEN} --discovery-token-ca-cert-hash sha256:${CA_HASH}"
+echo ""
